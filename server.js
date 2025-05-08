@@ -6,6 +6,11 @@ import fs from 'fs';
 import http from 'http';
 import { WebSocketServer } from 'ws';
 import cors from 'cors';
+import { fileURLToPath } from 'url';
+
+// Define __dirname for ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const upload = multer();
 const app = express();
