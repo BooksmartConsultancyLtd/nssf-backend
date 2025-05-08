@@ -20,8 +20,10 @@ const clients = new Map();
 app.use(cors({
   origin: '*', // Allow all origins
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
+  credentials: true,
+  preflightContinue: false,
+  optionsSuccessStatus: 204
 }));
 
 // Handle preflight requests
@@ -36,9 +38,24 @@ app.get('/', (req, res) => {
 
 // WebSocket connection handling
 wss.on('connection', (ws, req) => {
-  const url = new URL(req.url, 'http://localhost');
-  const id = url.searchParams.get('id');
-  
+  // Handle both localhost and production URLs
+  let id;
+  try {
+    // If req.url starts with /, it's a path, not a full URL
+    let url;
+    if (req.url.startsWith('/?id=')) {
+      url = new URL(`https://localhost${req.url}`);
+    } else {
+      url = new URL(req.url, 'https://localhost');
+    }
+    id = url.searchParams.get('id');
+  } catch (error) {
+    console.error('Error parsing WebSocket URL:', error);
+    // Try to extract id directly from URL if parsing fails
+    const match = req.url.match(/[?&]id=([^&]+)/);
+    id = match ? match[1] : null;
+  }
+
   if (id) {
     clients.set(id, ws);
     console.log(`WebSocket client connected with ID: ${id}`);
@@ -66,7 +83,7 @@ app.post(['/api/submit-form', '/submit-form'], upload.none(), async (req, res) =
   try {
     // Generate a unique request ID
     const requestId = Date.now().toString();
-    
+
     const {
       firstName,
       middleName,
@@ -83,7 +100,7 @@ app.post(['/api/submit-form', '/submit-form'], upload.none(), async (req, res) =
     // Use requestId in the filename for easier lookup
     const pdfFileName = `NSSF_${requestId}.pdf`;
     const pdfPath = path.join(outDir, pdfFileName);
-    
+
     // Create output directory if it doesn't exist
     if (!fs.existsSync(outDir)) {
       fs.mkdirSync(outDir, { recursive: true });
@@ -106,7 +123,7 @@ app.post(['/api/submit-form', '/submit-form'], upload.none(), async (req, res) =
       '--pdfPath', pdfPath
     ];
 
-    const child = spawn('node', ['automation.js', ...args], { 
+    const child = spawn('node', ['automation.js', ...args], {
       stdio: ['inherit', 'pipe', 'inherit'] // Capture stdout
     });
 
@@ -119,7 +136,7 @@ app.post(['/api/submit-form', '/submit-form'], upload.none(), async (req, res) =
         sendProgress(requestId, 'processing', percentage);
       }
     });
-    
+
     // Listen for errors
     child.stderr.on('data', (data) => {
       console.error(`Automation error: ${data.toString().trim()}`);
@@ -129,41 +146,41 @@ app.post(['/api/submit-form', '/submit-form'], upload.none(), async (req, res) =
     child.on('exit', (code) => {
       if (code !== 0) {
         sendProgress(requestId, 'error', 100);
-        res.status(500).json({ 
-          success: false, 
+        res.status(500).json({
+          success: false,
           message: 'Automation failed',
-          requestId 
+          requestId
         });
         return;
       }
-      
+
       // Read PDF as base64 and send to client
       fs.readFile(pdfPath, { encoding: 'base64' }, (err, data) => {
         if (err) {
           sendProgress(requestId, 'error', 100);
-          res.status(500).json({ 
-            success: false, 
+          res.status(500).json({
+            success: false,
             message: 'Failed to read PDF',
-            requestId 
+            requestId
           });
         } else {
           sendProgress(requestId, 'complete', 100);
-          res.json({ 
-            success: true, 
+          res.json({
+            success: true,
             pdfData: data,
-            requestId 
+            requestId
           });
         }
         // Clean up PDF file
-        fs.unlink(pdfPath, () => {});
+        fs.unlink(pdfPath, () => { });
       });
     });
 
     // Send the requestId immediately so frontend can connect to WebSocket
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       message: 'Processing started',
-      requestId 
+      requestId
     });
   } catch (err) {
     console.error(err);
@@ -175,16 +192,16 @@ app.post(['/api/submit-form', '/submit-form'], upload.none(), async (req, res) =
 app.get('/submit-form/status', async (req, res) => {
   try {
     const { id } = req.query;
-    
+
     if (!id) {
       return res.status(400).json({ success: false, message: 'Missing request ID' });
     }
-    
+
     // Check if we have PDF data for this request
     // In a real implementation, you would check a database or file storage
     // For now, we'll just return a status based on whether the WebSocket client exists
     const wsClient = clients.get(id);
-    
+
     if (wsClient) {
       // Still processing
       res.json({
@@ -197,7 +214,7 @@ app.get('/submit-form/status', async (req, res) => {
       // This is a simplified example - in production you'd check a database
       const outDir = process.env.OUTPUT_DIR || '/tmp';
       const pdfPath = path.join(outDir, `NSSF_${id}.pdf`);
-      
+
       if (fs.existsSync(pdfPath)) {
         const pdfData = fs.readFileSync(pdfPath, { encoding: 'base64' });
         res.json({
@@ -206,9 +223,9 @@ app.get('/submit-form/status', async (req, res) => {
           progress: 100,
           pdfData
         });
-        
+
         // Clean up the file
-        fs.unlink(pdfPath, () => {});
+        fs.unlink(pdfPath, () => { });
       } else {
         res.json({
           success: true,
@@ -220,8 +237,8 @@ app.get('/submit-form/status', async (req, res) => {
     }
   } catch (err) {
     console.error('Status check error:', err);
-    res.status(500).json({ 
-      success: false, 
+    res.status(500).json({
+      success: false,
       message: 'Failed to check status',
       status: 'error'
     });
@@ -233,14 +250,14 @@ app.get('/api/submit-form/status', async (req, res) => {
   try {
     // Forward to the main status endpoint
     const { id } = req.query;
-    
+
     if (!id) {
       return res.status(400).json({ success: false, message: 'Missing request ID' });
     }
-    
+
     // Check if we have PDF data for this request
     const wsClient = clients.get(id);
-    
+
     if (wsClient) {
       // Still processing
       res.json({
@@ -252,7 +269,7 @@ app.get('/api/submit-form/status', async (req, res) => {
       // No WebSocket client found, check if we have completed data
       const outDir = process.env.OUTPUT_DIR || '/tmp';
       const pdfPath = path.join(outDir, `NSSF_${id}.pdf`);
-      
+
       if (fs.existsSync(pdfPath)) {
         const pdfData = fs.readFileSync(pdfPath, { encoding: 'base64' });
         res.json({
@@ -261,9 +278,9 @@ app.get('/api/submit-form/status', async (req, res) => {
           progress: 100,
           pdfData
         });
-        
+
         // Clean up the file
-        fs.unlink(pdfPath, () => {});
+        fs.unlink(pdfPath, () => { });
       } else {
         res.json({
           success: true,
@@ -275,8 +292,8 @@ app.get('/api/submit-form/status', async (req, res) => {
     }
   } catch (err) {
     console.error('API status check error:', err);
-    res.status(500).json({ 
-      success: false, 
+    res.status(500).json({
+      success: false,
       message: 'Failed to check status',
       status: 'error'
     });
