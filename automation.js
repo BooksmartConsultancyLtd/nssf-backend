@@ -166,7 +166,7 @@ const captureCaptcha = async (page, shouldRefresh = false) => {
 
     browser = await chromium.launch({
       headless: true,
-      channel: 'chrome',
+      // channel: 'chrome',
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
     });
     context = await browser.newContext();
