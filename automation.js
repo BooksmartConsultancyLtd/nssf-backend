@@ -4,6 +4,7 @@ import path from 'path';
 
 const args = minimist(process.argv.slice(2));
 
+// Extract and convert all values to strings to prevent Playwright fill errors
 const {
   requestId,
   firstName,
@@ -16,6 +17,20 @@ const {
   email,
   pdfPath
 } = args;
+
+// Ensure all values that will be used in form filling are strings
+const formValues = {
+  requestId: String(requestId),
+  firstName: String(firstName),
+  middleName: middleName ? String(middleName) : '',
+  surname: String(surname),
+  idNumber: String(idNumber),
+  dateOfBirth: String(dateOfBirth),
+  districtOfBirth: districtOfBirth ? String(districtOfBirth) : '',
+  mobileNumber: String(mobileNumber),
+  email: String(email),
+  pdfPath: String(pdfPath)
+};
 
 // Function to report progress to parent process
 const sendProgress = (percentage) => {
@@ -42,10 +57,10 @@ const sendProgress = (percentage) => {
     sendProgress(25);
 
     // Fill in the login credentials
-    await page.getByRole('textbox', { name: 'Username:' }).fill(idNumber);
-    await page.getByRole('textbox', { name: 'Password:', exact: true }).fill(idNumber);
-    await page.getByRole('textbox', { name: 'Verify Password:' }).fill(idNumber);
-    await page.getByRole('textbox', { name: 'ID No:' }).fill(idNumber);
+    await page.getByRole('textbox', { name: 'Username:' }).fill(formValues.idNumber);
+    await page.getByRole('textbox', { name: 'Password:', exact: true }).fill(formValues.idNumber);
+    await page.getByRole('textbox', { name: 'Verify Password:' }).fill(formValues.idNumber);
+    await page.getByRole('textbox', { name: 'ID No:' }).fill(formValues.idNumber);
     sendProgress(30);
 
     // Select ID document type
@@ -54,19 +69,20 @@ const sendProgress = (percentage) => {
     sendProgress(35);
 
     // Fill nationality and country of birth
-    await page.getByRole('textbox', { name: 'Nationality:' }).fill('4.24');
-    await page.getByRole('textbox', { name: 'Country of Birth:' }).fill('4.24');
+    // Replace hardcoded values with string literals
+    await page.getByRole('textbox', { name: 'Nationality:' }).fill('Kenya');
+    await page.getByRole('textbox', { name: 'Country of Birth:' }).fill('Kenya');
     sendProgress(40);
 
     // Fill personal details
-    await page.getByRole('textbox', { name: 'First Name:' }).fill(firstName);
-    await page.getByRole('textbox', { name: 'Surname:' }).fill(surname);
-    await page.getByRole('textbox', { name: 'Middle Name:' }).fill(middleName);
+    await page.getByRole('textbox', { name: 'First Name:' }).fill(formValues.firstName);
+    await page.getByRole('textbox', { name: 'Surname:' }).fill(formValues.surname);
+    await page.getByRole('textbox', { name: 'Middle Name:' }).fill(formValues.middleName);
     sendProgress(45);
 
     // Select gender and fill DOB
     await page.locator('td:nth-child(3) > .ui-radiobutton > .ui-radiobutton-box').first().click();
-    await page.getByRole('textbox', { name: 'Date of Birth:' }).fill(dateOfBirth);
+    await page.getByRole('textbox', { name: 'Date of Birth:' }).fill(formValues.dateOfBirth);
     sendProgress(50);
 
     // Select voluntary flag
@@ -79,15 +95,15 @@ const sendProgress = (percentage) => {
     sendProgress(60);
 
     // Fill contact details
-    await page.getByRole('textbox', { name: 'Telephone:' }).fill(mobileNumber);
-    await page.getByRole('textbox', { name: 'Email:' }).fill(email);
+    await page.getByRole('textbox', { name: 'Telephone:' }).fill(formValues.mobileNumber);
+    await page.getByRole('textbox', { name: 'Email:' }).fill(formValues.email);
     sendProgress(65);
 
     // Fill location details
     await page.getByRole('textbox', { name: 'County:' }).fill('1.01');
     await page.getByRole('textbox', { name: 'District:' }).fill('Nairobi');
     await page.getByRole('textbox', { name: 'Location:' }).fill('Nairobi');
-    await page.getByRole('textbox', { name: 'District of Birth:' }).fill(districtOfBirth);
+    await page.getByRole('textbox', { name: 'District of Birth:' }).fill(formValues.districtOfBirth);
     sendProgress(70);
 
     // Handle CAPTCHA and submit
