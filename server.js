@@ -80,10 +80,19 @@ const sendProgress = (id, status, progress) => {
 
 // Handle both /api/submit-form and /submit-form for flexibility
 app.post(['/api/submit-form', '/submit-form'], upload.none(), async (req, res) => {
-  try {
-    // Generate a unique request ID
-    const requestId = Date.now().toString();
+  // Important: We need to send the response with requestId FIRST,
+  // then start the automation process to avoid response conflicts
+  let requestId;
 
+  try {
+    // Log the incoming request for debugging
+    console.log('Received form submission:', JSON.stringify(req.body, null, 2));
+
+    // Generate a unique request ID
+    requestId = Date.now().toString();
+    console.log(`Generated request ID: ${requestId}`);
+
+    // Validate required fields
     const {
       firstName,
       middleName,
@@ -95,96 +104,124 @@ app.post(['/api/submit-form', '/submit-form'], upload.none(), async (req, res) =
       email
     } = req.body;
 
-    // Generate a unique PDF output path
-    const outDir = process.env.OUTPUT_DIR || '/tmp';
-    // Use requestId in the filename for easier lookup
-    const pdfFileName = `NSSF_${requestId}.pdf`;
-    const pdfPath = path.join(outDir, pdfFileName);
-
-    // Create output directory if it doesn't exist
-    if (!fs.existsSync(outDir)) {
-      fs.mkdirSync(outDir, { recursive: true });
+    if (!firstName || !surname || !idNumber || !dateOfBirth || !mobileNumber || !email) {
+      console.error('Missing required fields in form submission');
+      return res.status(400).json({ success: false, message: 'Missing required fields' });
     }
 
-    // Send initial progress update
-    sendProgress(requestId, 'starting', 0);
-
-    // Spawn the Playwright automation script
-    const args = [
-      '--requestId', requestId,
-      '--firstName', firstName,
-      '--middleName', middleName,
-      '--surname', surname,
-      '--idNumber', idNumber,
-      '--dateOfBirth', dateOfBirth,
-      '--districtOfBirth', districtOfBirth,
-      '--mobileNumber', mobileNumber,
-      '--email', email,
-      '--pdfPath', pdfPath
-    ];
-
-    const child = spawn('node', ['automation.js', ...args], {
-      stdio: ['inherit', 'pipe', 'inherit'] // Capture stdout
-    });
-
-    // Listen for progress updates from the automation script
-    child.stdout.on('data', (data) => {
-      const output = data.toString().trim();
-      console.log(`Automation output: ${output}`);
-      if (output.startsWith('PROGRESS:')) {
-        const percentage = parseInt(output.split(':')[1], 10);
-        sendProgress(requestId, 'processing', percentage);
-      }
-    });
-
-    // Listen for errors
-    child.stderr.on('data', (data) => {
-      console.error(`Automation error: ${data.toString().trim()}`);
-      sendProgress(requestId, 'error', 0);
-    });
-
-    child.on('exit', (code) => {
-      if (code !== 0) {
-        sendProgress(requestId, 'error', 100);
-        res.status(500).json({
-          success: false,
-          message: 'Automation failed',
-          requestId
-        });
-        return;
-      }
-
-      // Read PDF as base64 and send to client
-      fs.readFile(pdfPath, { encoding: 'base64' }, (err, data) => {
-        if (err) {
-          sendProgress(requestId, 'error', 100);
-          res.status(500).json({
-            success: false,
-            message: 'Failed to read PDF',
-            requestId
-          });
-        } else {
-          sendProgress(requestId, 'complete', 100);
-          res.json({
-            success: true,
-            pdfData: data,
-            requestId
-          });
-        }
-        // Clean up PDF file
-        fs.unlink(pdfPath, () => { });
-      });
-    });
-
     // Send the requestId immediately so frontend can connect to WebSocket
+    // This MUST happen before we start the automation process
     res.json({
       success: true,
       message: 'Processing started',
       requestId
     });
+
+    // Process in the background after sending response
+    (async () => {
+      try {
+        // Generate a unique PDF output path
+        // Use relative path for Railway compatibility
+        const outDir = process.env.OUTPUT_DIR || './tmp';
+        console.log(`Using output directory: ${outDir}`);
+
+        // Use requestId in the filename for easier lookup
+        const pdfFileName = `NSSF_${requestId}.pdf`;
+        const pdfPath = path.join(outDir, pdfFileName);
+        console.log(`PDF will be saved to: ${pdfPath}`);
+
+        // Create output directory if it doesn't exist
+        try {
+          if (!fs.existsSync(outDir)) {
+            fs.mkdirSync(outDir, { recursive: true });
+            console.log(`Created output directory: ${outDir}`);
+          }
+        } catch (dirError) {
+          console.error(`Error creating directory: ${dirError.message}`);
+          // Try using current directory as fallback
+          const fallbackDir = '.';
+          const fallbackPath = path.join(fallbackDir, pdfFileName);
+          console.log(`Using fallback path: ${fallbackPath}`);
+        }
+
+        // Send initial progress update
+        sendProgress(requestId, 'starting', 0);
+
+        // Spawn the Playwright automation script
+        const args = [
+          '--requestId', requestId,
+          '--firstName', firstName,
+          '--middleName', middleName || '',
+          '--surname', surname,
+          '--idNumber', idNumber,
+          '--dateOfBirth', dateOfBirth,
+          '--districtOfBirth', districtOfBirth || '',
+          '--mobileNumber', mobileNumber,
+          '--email', email,
+          '--pdfPath', pdfPath
+        ];
+
+        console.log(`Spawning automation process with args: ${args.join(' ')}`);
+
+        // Get the absolute path to automation.js
+        const automationScriptPath = path.resolve(__dirname, 'automation.js');
+        console.log(`Using automation script at: ${automationScriptPath}`);
+
+        // Spawn with detailed error handling
+        const child = spawn('node', [automationScriptPath, ...args], {
+          stdio: ['inherit', 'pipe', 'pipe'], // Capture both stdout and stderr
+          env: { ...process.env, DISPLAY: '' } // Ensure headless mode works
+        });
+
+        // Check if process was created successfully
+        if (!child.pid) {
+          throw new Error('Failed to spawn Playwright automation process');
+        }
+        console.log(`Automation process spawned with PID: ${child.pid}`);
+
+        // Listen for progress updates from the automation script
+        child.stdout.on('data', (data) => {
+          const output = data.toString().trim();
+          console.log(`Automation output: ${output}`);
+          if (output.startsWith('PROGRESS:')) {
+            const percentage = parseInt(output.split(':')[1], 10);
+            sendProgress(requestId, 'processing', percentage);
+          }
+        });
+
+        // Listen for errors
+        child.stderr.on('data', (data) => {
+          const errorMsg = data.toString().trim();
+          console.error(`Automation error: ${errorMsg}`);
+          sendProgress(requestId, 'error', 0);
+        });
+
+        // Handle spawn error (rare but possible)
+        child.on('error', (error) => {
+          console.error(`Failed to start automation: ${error.message}`);
+          sendProgress(requestId, 'error', 0);
+        });
+
+        child.on('exit', (code) => {
+          if (code !== 0) {
+            console.error(`Automation process exited with code ${code}`);
+            sendProgress(requestId, 'error', 100);
+            return;
+          }
+
+          console.log('Automation completed successfully');
+          sendProgress(requestId, 'complete', 100);
+        });
+      } catch (automationError) {
+        console.error(`Automation error: ${automationError.message}`);
+        sendProgress(requestId, 'error', 0);
+      }
+    })();
   } catch (err) {
     console.error(err);
-    res.status(500).json({ success: false, message: 'Server error' });
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, message: 'Server error' });
+    }
   }
 });
 
