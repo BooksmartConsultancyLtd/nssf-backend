@@ -249,16 +249,22 @@ const sendProgress = async (id, status, progress, errorMessage = null, captchaIm
       // Store the CAPTCHA image in the map for polling fallback
       captchaImages.set(id, captchaImage);
 
-      // First send a message without the image to alert the client
-      ws.send(JSON.stringify({
-        status: 'captcha_preparing',
-        progress: progress,
-        message: 'Preparing CAPTCHA verification',
-        timestamp: Date.now()
-      }));
+      try {
+        // First send a message without the image to alert the client
+        console.log(`Sending CAPTCHA preparing status to ${id}`);
+        ws.send(JSON.stringify({
+          status: 'captcha_preparing',
+          progress: progress,
+          message: 'Preparing CAPTCHA verification',
+          timestamp: Date.now()
+        }));
 
-      // Wait a short time to ensure the preparation message is processed
-      await new Promise(resolve => setTimeout(resolve, 200));
+        // Wait a short time to ensure the preparation message is processed
+        await new Promise(resolve => setTimeout(resolve, 200));
+      } catch (prepError) {
+        console.error(`Error sending CAPTCHA preparation message to ${id}:`, prepError);
+        // Continue despite the error - attempt to send the CAPTCHA anyway
+      }
 
       // Split the CAPTCHA image into chunks if it's very large
       // This avoids WebSocket message size limitations and JSON parsing issues
@@ -556,12 +562,34 @@ app.post(['/api/submit-form', '/submit-form'], upload.none(), async (req, res) =
 
           // Check if we're starting CAPTCHA data
           if (output.includes('CAPTCHA_READY:')) {
-            captchaBuffer = '';
-            isCaptchaMode = true;
+            // This is a more direct approach to extract CAPTCHA data
+            console.log(`Detected CAPTCHA data for ${requestId}`);
 
-            // Extract initial CAPTCHA data
-            const captchaStart = output.indexOf('CAPTCHA_READY:') + 'CAPTCHA_READY:'.length;
-            captchaBuffer += output.substring(captchaStart);
+            try {
+              // Extract the CAPTCHA data directly
+              const captchaStart = output.indexOf('CAPTCHA_READY:') + 'CAPTCHA_READY:'.length;
+              const captchaData = output.substring(captchaStart).trim();
+
+              // Immediately store and send if it looks complete
+              if (captchaData.length > 1000) { // Basic validation that we have enough data
+                console.log(`Extracted complete CAPTCHA image (${captchaData.length} bytes)`);
+
+                // Store for polling fallback
+                captchaImages.set(requestId, captchaData);
+
+                // Send to client via explicit progress update
+                console.log(`Sending CAPTCHA image to client ${requestId}`);
+                sendProgress(requestId, 'captcha_ready', 70, null, captchaData);
+                return;
+              }
+
+              // If we don't have enough data, start buffering mode
+              captchaBuffer = captchaData;
+              isCaptchaMode = true;
+              console.log(`Started CAPTCHA buffering with initial ${captchaBuffer.length} bytes`);
+            } catch (captchaError) {
+              console.error(`Error processing CAPTCHA data for ${requestId}:`, captchaError);
+            }
             return;
           }
 
