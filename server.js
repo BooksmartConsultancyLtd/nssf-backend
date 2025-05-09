@@ -7,6 +7,7 @@ import http from 'http';
 import { WebSocketServer } from 'ws';
 import cors from 'cors';
 import { fileURLToPath } from 'url';
+import nodemailer from 'nodemailer';
 
 // Define __dirname for ES modules
 const __filename = fileURLToPath(import.meta.url);
@@ -20,6 +21,59 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 const PORT = process.env.PORT || 3001;
+
+// Configure email transport
+const emailTransporter = nodemailer.createTransport({
+  service: process.env.EMAIL_SERVICE || 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER || 'hadeazydigital@gmail.com',
+    pass: process.env.EMAIL_PASSWORD || 'gmlr xjxx ndue yfoq'
+  }
+});
+
+// Function to send PDF via email and delete it afterward
+const sendPdfByEmail = async (pdfPath, email, name, idNumber) => {
+  try {
+    if (!fs.existsSync(pdfPath)) {
+      console.error(`PDF file not found at path: ${pdfPath}`);
+      return false;
+    }
+
+    console.log(`Sending PDF via email to ${email}`);
+
+    // Create email content
+    const mailOptions = {
+      from: process.env.EMAIL_USER || 'your-email@gmail.com',
+      to: email,
+      subject: 'Your NSSF Registration Document',
+      text: `Dear ${name},\n\nThank you for completing your NSSF registration. Your registration document is attached to this email.\n\nYour ID Number: ${idNumber}\n\nRegards,\nNSSF Registration Team`,
+      attachments: [
+        {
+          filename: `NSSF_Registration_${idNumber}.pdf`,
+          path: pdfPath
+        }
+      ]
+    };
+
+    // Send the email
+    const info = await emailTransporter.sendMail(mailOptions);
+    console.log(`Email sent successfully: ${info.messageId}`);
+
+    // Delete the PDF file after it's been emailed
+    try {
+      fs.unlinkSync(pdfPath);
+      console.log(`PDF file deleted after email: ${pdfPath}`);
+    } catch (deleteError) {
+      console.error(`Error deleting PDF file: ${deleteError.message}`);
+      // Continue even if deletion fails
+    }
+
+    return true;
+  } catch (error) {
+    console.error(`Error sending email: ${error.message}`);
+    return false;
+  }
+};
 
 // Function to process pending message queue for a specific request ID
 const startMessageRetryProcess = (id) => {
@@ -168,6 +222,9 @@ const captchaImages = new Map();
 
 // Message queues for pending messages when WebSocket isn't connected
 const pendingMessages = new Map();
+
+// Store form data by request ID for email sending
+const formDataStore = new Map();
 
 // Max retry attempts for important messages
 const MAX_MESSAGE_RETRIES = 10;
@@ -503,6 +560,18 @@ app.post(['/api/submit-form', '/submit-form'], upload.none(), async (req, res) =
     // Generate a unique request ID
     requestId = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
     console.log(`Generated request ID: ${requestId}`);
+
+    // Store the form data for later email sending
+    formDataStore.set(requestId, {
+      firstName: req.body.firstName || '',
+      middleName: req.body.middleName || '',
+      surname: req.body.surname || '',
+      idNumber: req.body.idNumber || '',
+      email: req.body.email || '',
+      mobileNumber: req.body.mobileNumber || ''
+    });
+
+    console.log(`Stored form data for ${requestId} for later email sending`);
 
     // Validate required fields
     const {
@@ -1052,16 +1121,45 @@ app.get('/download-pdf/:requestId', (req, res) => {
       });
     }
 
-    const pdfPath = path.join(tmpDir, `NSSF_${requestId}.pdf`);
+    console.log(`Processing PDF download request for ID: ${requestId}`);
 
-    if (!fs.existsSync(pdfPath)) {
+    // Extract the actual requestId if it has an ID prefix
+    const actualRequestId = requestId.startsWith('ID') ? requestId.substring(2) : requestId;
+    console.log(`Actual request ID or user ID: ${actualRequestId}`);
+
+    // Check both the exact path and potential variations
+    const exactPdfPath = path.join(tmpDir, `NSSF_${requestId}.pdf`);
+    const idPrefixPath = path.join(tmpDir, `NSSF_ID${actualRequestId}.pdf`);
+    const simplePath = path.join(tmpDir, `NSSF_${actualRequestId}.pdf`);
+
+    // Try to find the PDF using various possible paths
+    let pdfPath = null;
+    if (fs.existsSync(exactPdfPath)) {
+      console.log(`Found PDF at exact path: ${exactPdfPath}`);
+      pdfPath = exactPdfPath;
+    } else if (fs.existsSync(idPrefixPath)) {
+      console.log(`Found PDF at ID prefix path: ${idPrefixPath}`);
+      pdfPath = idPrefixPath;
+    } else if (fs.existsSync(simplePath)) {
+      console.log(`Found PDF at simple path: ${simplePath}`);
+      pdfPath = simplePath;
+    }
+
+    if (!pdfPath) {
+      console.error(`PDF not found for request ID: ${requestId}`);
+      console.error(`Tried paths: ${exactPdfPath}, ${idPrefixPath}, ${simplePath}`);
       return res.status(404).json({
         success: false,
         message: 'PDF not found'
       });
     }
 
-    res.download(pdfPath, `NSSF_Registration_${requestId}.pdf`, (error) => {
+    // Read the file before downloading so we can email it later
+    const pdfData = fs.readFileSync(pdfPath);
+    console.log(`Read PDF data for ${requestId}, size: ${pdfData.length} bytes`);
+
+    // Send the PDF for download
+    res.download(pdfPath, `NSSF_Registration_${requestId}.pdf`, async (error) => {
       if (error) {
         console.error(`Error downloading PDF for ${requestId}:`, error);
 
@@ -1072,6 +1170,48 @@ app.get('/download-pdf/:requestId', (req, res) => {
             message: 'Failed to download PDF',
             error: error.message
           });
+        }
+      } else {
+        // Try to find the user information for this request
+        const userId = requestId.replace('NSSF_', '');
+        // Check if we have form data for this user
+        if (formDataStore.has(userId)) {
+          const userData = formDataStore.get(userId);
+          console.log(`Found user data for email sending: ${userData.email}`);
+
+          // Send the PDF via email
+          try {
+            const fullName = `${userData.firstName} ${userData.surname}`;
+            await sendPdfByEmail(
+              pdfPath,
+              userData.email,
+              fullName,
+              userData.idNumber
+            );
+            console.log(`PDF sent via email to ${userData.email} and deleted from server`);
+          } catch (emailError) {
+            console.error(`Failed to send PDF via email: ${emailError.message}`);
+            // Delete the PDF anyway after a delay
+            setTimeout(() => {
+              try {
+                fs.unlinkSync(pdfPath);
+                console.log(`Deleted PDF file after download: ${pdfPath}`);
+              } catch (deleteError) {
+                console.error(`Error deleting PDF: ${deleteError.message}`);
+              }
+            }, 5000);
+          }
+        } else {
+          console.log(`No user data found for ${userId}, deleting PDF without email`);
+          // Delete the PDF after a short delay (to ensure download completes)
+          setTimeout(() => {
+            try {
+              fs.unlinkSync(pdfPath);
+              console.log(`Deleted PDF file after download: ${pdfPath}`);
+            } catch (deleteError) {
+              console.error(`Error deleting PDF: ${deleteError.message}`);
+            }
+          }, 5000);
         }
       }
     });
