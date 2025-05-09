@@ -119,14 +119,35 @@ const sendCaptchaMessage = async (id, progress, captchaImage) => {
     // Wait a short time to ensure the preparation message is processed
     await new Promise(resolve => setTimeout(resolve, 200));
 
-    // Send the actual CAPTCHA image
-    console.log(`Sending CAPTCHA image to ${id} (${captchaImage.length} bytes)`);
-    ws.send(JSON.stringify({
+    // Debug CAPTCHA data format
+    console.log(`CAPTCHA data type: ${typeof captchaImage}`);
+    console.log(`CAPTCHA data length: ${captchaImage.length} bytes`);
+    console.log(`CAPTCHA data first 20 chars: ${captchaImage.substring(0, 20)}`);
+
+    // Create a message object with the CAPTCHA data
+    const captchaMessage = {
       status: 'captcha_ready',
       progress: progress,
       captchaImage: captchaImage,
+      message: 'Processing ' + progress + '%',
       timestamp: Date.now()
-    }));
+    };
+
+    // Directly check if the CAPTCHA data is included
+    const messageJson = JSON.stringify(captchaMessage);
+    const hasCaptchaData = messageJson.includes(captchaImage.substring(0, 20));
+    console.log(`CAPTCHA JSON includes image data: ${hasCaptchaData}`);
+    console.log(`CAPTCHA message length: ${messageJson.length} bytes`);
+
+    // Send the actual CAPTCHA image
+    console.log(`Sending complete CAPTCHA image to ${id} (${captchaImage.length} bytes)`);
+    ws.send(messageJson);
+
+    // Also store in the captchaImages map for fallback 
+    captchaImages.set(id, captchaImage);
+
+    // Log success
+    console.log(`Successfully sent CAPTCHA data to ${id}`);
 
     return true;
   } catch (error) {
