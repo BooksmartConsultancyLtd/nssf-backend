@@ -21,6 +21,120 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 const PORT = process.env.PORT || 3001;
 
+// Function to process pending message queue for a specific request ID
+const startMessageRetryProcess = (id) => {
+  // Check if there's already a retry process running for this ID
+  if (pendingMessages.get(id)?.isProcessing) {
+    return;
+  }
+
+  // Set processing flag
+  if (pendingMessages.has(id)) {
+    pendingMessages.get(id).isProcessing = true;
+  }
+
+  // Create a retry interval
+  const retryInterval = setInterval(() => {
+    // If no more pending messages, clear interval and return
+    if (!pendingMessages.has(id) || pendingMessages.get(id).length === 0) {
+      clearInterval(retryInterval);
+      if (pendingMessages.has(id)) {
+        pendingMessages.get(id).isProcessing = false;
+      }
+      return;
+    }
+
+    // Get the WebSocket
+    const ws = clients.get(id);
+    if (!ws || ws.readyState !== 1) {
+      // If still not connected, check if we need to increment retries
+      pendingMessages.get(id).forEach(msg => {
+        if (Date.now() >= msg.nextRetry) {
+          msg.retries++;
+          msg.nextRetry = Date.now() + MESSAGE_RETRY_INTERVAL;
+
+          if (msg.retries >= MAX_MESSAGE_RETRIES) {
+            console.error(`Giving up on message delivery for ${id} after ${MAX_MESSAGE_RETRIES} attempts`);
+            pendingMessages.set(id, pendingMessages.get(id).filter(m => m !== msg));
+          }
+        }
+      });
+      return;
+    }
+
+    // Process messages if WebSocket is connected
+    const pendingMsgs = [...pendingMessages.get(id)];
+    pendingMessages.set(id, []);
+
+    // Send each pending message
+    pendingMsgs.forEach(async msg => {
+      try {
+        const { payload } = msg;
+        console.log(`Sending queued ${payload.type} message to ${id}`);
+
+        // Handle different message types
+        if (payload.type === 'captcha') {
+          // For CAPTCHA messages, use the special handling
+          await sendCaptchaMessage(id, payload.progress, payload.captchaImage);
+        } else {
+          // For other messages, send directly
+          ws.send(JSON.stringify({
+            status: payload.status,
+            progress: payload.progress,
+            message: payload.errorMessage || `Processing ${payload.progress}%`,
+            ...payload.additionalData,
+            timestamp: Date.now()
+          }));
+        }
+      } catch (error) {
+        console.error(`Error sending queued message to ${id}:`, error);
+      }
+    });
+
+    // Clear interval if no more messages
+    if (pendingMessages.get(id).length === 0) {
+      clearInterval(retryInterval);
+      pendingMessages.get(id).isProcessing = false;
+    }
+  }, 1000); // Check every second
+};
+
+// Function to specifically handle sending CAPTCHA messages
+const sendCaptchaMessage = async (id, progress, captchaImage) => {
+  const ws = clients.get(id);
+  if (!ws || ws.readyState !== 1) {
+    return false;
+  }
+
+  try {
+    // First send a message without the image to alert the client
+    console.log(`Sending CAPTCHA preparing status to ${id}`);
+    ws.send(JSON.stringify({
+      status: 'captcha_preparing',
+      progress: progress,
+      message: 'Preparing CAPTCHA verification',
+      timestamp: Date.now()
+    }));
+
+    // Wait a short time to ensure the preparation message is processed
+    await new Promise(resolve => setTimeout(resolve, 200));
+
+    // Send the actual CAPTCHA image
+    console.log(`Sending CAPTCHA image to ${id} (${captchaImage.length} bytes)`);
+    ws.send(JSON.stringify({
+      status: 'captcha_ready',
+      progress: progress,
+      captchaImage: captchaImage,
+      timestamp: Date.now()
+    }));
+
+    return true;
+  } catch (error) {
+    console.error(`Error sending CAPTCHA message to ${id}:`, error);
+    return false;
+  }
+};
+
 // Store WebSocket connections with their IDs
 const clients = new Map();
 
@@ -30,6 +144,13 @@ const automationStdins = new Map();
 
 // Store CAPTCHA images by request ID
 const captchaImages = new Map();
+
+// Message queues for pending messages when WebSocket isn't connected
+const pendingMessages = new Map();
+
+// Max retry attempts for important messages
+const MAX_MESSAGE_RETRIES = 10;
+const MESSAGE_RETRY_INTERVAL = 1000; // 1 second
 
 // Enable CORS for all routes
 app.use(cors({
@@ -236,7 +357,64 @@ const storeCaptchaInput = (id, captchaText) => {
 const sendProgress = async (id, status, progress, errorMessage = null, captchaImage = null, additionalData = {}) => {
   const ws = clients.get(id);
 
-  if (!ws || ws.readyState !== 1) {
+  // Create message payload based on type
+  let messagePayload;
+  let isImportant = false;
+
+  // Determine if this is a critical message that should be queued if WebSocket not available
+  if (status === 'captcha_ready' && captchaImage) {
+    // CAPTCHA messages are important
+    isImportant = true;
+    messagePayload = {
+      type: 'captcha',
+      status, progress, captchaImage,
+      timestamp: Date.now()
+    };
+  } else if (status === 'complete' || progress === 100) {
+    // Completion messages are important
+    isImportant = true;
+    messagePayload = {
+      type: 'completion',
+      status, progress, additionalData, errorMessage,
+      timestamp: Date.now()
+    };
+  } else if (status === 'error') {
+    // Error messages are important
+    isImportant = true;
+    messagePayload = {
+      type: 'error',
+      status, progress, errorMessage,
+      timestamp: Date.now()
+    };
+  } else {
+    // Regular progress updates
+    messagePayload = {
+      type: 'progress',
+      status, progress, additionalData, errorMessage,
+      timestamp: Date.now()
+    };
+  }
+
+  // If WebSocket is not connected but message is important, queue it for retry
+  if ((!ws || ws.readyState !== 1) && isImportant) {
+    console.log(`WebSocket not connected for ${id}. Queuing important ${messagePayload.type} message.`);
+
+    // Initialize queue if it doesn't exist
+    if (!pendingMessages.has(id)) {
+      pendingMessages.set(id, []);
+    }
+
+    // Add message to queue with retry information
+    pendingMessages.get(id).push({
+      payload: messagePayload,
+      retries: 0,
+      nextRetry: Date.now() + MESSAGE_RETRY_INTERVAL
+    });
+
+    // Start retry process if not already running
+    startMessageRetryProcess(id);
+    return;
+  } else if (!ws || ws.readyState !== 1) {
     console.error(`Cannot send progress update to ${id}: WebSocket not connected`);
     return;
   }
@@ -244,69 +422,20 @@ const sendProgress = async (id, status, progress, errorMessage = null, captchaIm
   try {
     // For CAPTCHA images, use a special dedicated mechanism to avoid JSON parsing issues
     if (status === 'captcha_ready' && captchaImage) {
-      console.log(`Sending CAPTCHA image to ${id} (${captchaImage.length} bytes)`);
-
       // Store the CAPTCHA image in the map for polling fallback
       captchaImages.set(id, captchaImage);
 
-      try {
-        // First send a message without the image to alert the client
-        console.log(`Sending CAPTCHA preparing status to ${id}`);
-        ws.send(JSON.stringify({
-          status: 'captcha_preparing',
-          progress: progress,
-          message: 'Preparing CAPTCHA verification',
-          timestamp: Date.now()
-        }));
+      // Use the dedicated function to send CAPTCHA data
+      const sent = await sendCaptchaMessage(id, progress, captchaImage);
 
-        // Wait a short time to ensure the preparation message is processed
-        await new Promise(resolve => setTimeout(resolve, 200));
-      } catch (prepError) {
-        console.error(`Error sending CAPTCHA preparation message to ${id}:`, prepError);
-        // Continue despite the error - attempt to send the CAPTCHA anyway
-      }
-
-      // Split the CAPTCHA image into chunks if it's very large
-      // This avoids WebSocket message size limitations and JSON parsing issues
-      const MAX_CHUNK_SIZE = 10000; // Adjust as needed
-
-      if (captchaImage.length > MAX_CHUNK_SIZE) {
-        // Send in chunks - first notify client we're sending chunks
-        ws.send(JSON.stringify({
-          status: 'captcha_chunks_start',
-          progress: progress,
-          totalChunks: Math.ceil(captchaImage.length / MAX_CHUNK_SIZE),
-          timestamp: Date.now()
-        }));
-
-        // Send each chunk with a small delay between
-        for (let i = 0; i < captchaImage.length; i += MAX_CHUNK_SIZE) {
-          const chunk = captchaImage.substring(i, i + MAX_CHUNK_SIZE);
-          const chunkNum = Math.floor(i / MAX_CHUNK_SIZE) + 1;
-          const isLastChunk = i + MAX_CHUNK_SIZE >= captchaImage.length;
-
-          ws.send(JSON.stringify({
-            status: isLastChunk ? 'captcha_chunks_end' : 'captcha_chunk',
-            progress: progress,
-            chunkNum: chunkNum,
-            chunk: chunk,
-            timestamp: Date.now()
-          }));
-
-          // Small delay between chunks
-          if (!isLastChunk) {
-            await new Promise(resolve => setTimeout(resolve, 50));
-          }
-        }
+      if (sent) {
+        console.log(`Successfully sent CAPTCHA image to ${id}`);
       } else {
-        // Send the whole image in one message if it's small enough
-        ws.send(JSON.stringify({
-          status: 'captcha_ready',
-          progress: progress,
-          captchaImage: captchaImage,
-          timestamp: Date.now()
-        }));
+        console.error(`Failed to send CAPTCHA image to ${id}`);
       }
+
+      // Return early as we've handled this message type
+      return;
     } else {
       // For non-CAPTCHA updates, use the normal approach
       const baseMessage = {
